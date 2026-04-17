@@ -704,8 +704,9 @@ class RobotObjectGoalConditioned(RobotObjectTracking):
             return
         with torch.device(self.device):
             self.goal_object_pos_w = torch.zeros(self.num_envs, 3)
+            # wxyz quaternion convention (index 0 = w); initialise as identity (no rotation)
             self.goal_object_quat_w = torch.zeros(self.num_envs, 4)
-            self.goal_object_quat_w[:, 0] = 1.0  # identity quaternion (w=1)
+            self.goal_object_quat_w[:, 0] = 1.0  # w = 1 → identity quaternion
 
         self.goal_pos_range = torch.tensor(
             self._goal_pos_range, device=self.device

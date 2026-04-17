@@ -16,6 +16,13 @@ from tensordict.nn import TensorDictSequential
 from active_adaptation.utils.export import export_onnx
 from active_adaptation.utils.wandb import parse_checkpoint_path
 
+# Target strings used to identify command manager types
+_TARGET_ROBOT_TRACKING = "active_adaptation.envs.mdp.commands.hdmi.command.RobotTracking"
+_TARGET_ROBOT_OBJECT_TRACKING = "active_adaptation.envs.mdp.commands.hdmi.command.RobotObjectTracking"
+_TARGET_ROBOT_GOAL_CONDITIONED = "active_adaptation.envs.mdp.commands.hdmi.command.RobotObjectGoalConditioned"
+_TARGET_BOX_TRANSPORT = "active_adaptation.envs.mdp.commands.box_transport.command.BoxTransport"
+_TARGET_MOTION_TRACKING = "active_adaptation.envs.mdp.commands.motion_tracking.command.MotionTrackingCommand"
+
 
 @hydra.main(config_path="../cfg", config_name="play", version_base=None)
 def main(cfg):
@@ -134,7 +141,7 @@ def main(cfg):
         command = env.command_manager
         cmd_key = "command" if "command" in policy_config["observation"] else "command_"
         command_obs = policy_config["observation"][cmd_key]
-        if cfg.task.command._target_ == "active_adaptation.envs.mdp.commands.motion_tracking.command.MotionTrackingCommand":
+        if cfg.task.command._target_ == _TARGET_MOTION_TRACKING:
             from active_adaptation.envs.mdp.commands.motion_tracking.command import MotionTrackingCommand
             command: MotionTrackingCommand
             assert command.dataset.num_motions == 1
@@ -150,7 +157,7 @@ def main(cfg):
                 command_obs[obs_key]["body_names"] = tracking_keypoint_names
                 command_obs[obs_key]["joint_names"] = tracking_joint_names
                 command_obs[obs_key]["root_body_name"] = "pelvis"
-        elif cfg.task.command._target_ == "active_adaptation.envs.mdp.commands.hdmi.command.RobotTracking":
+        elif cfg.task.command._target_ == _TARGET_ROBOT_TRACKING:
             from active_adaptation.envs.mdp.commands.hdmi.command import RobotTracking
             command: RobotTracking
             assert command.dataset.num_motions == 1
@@ -170,7 +177,7 @@ def main(cfg):
                 command_obs[obs_key]["body_names"] = tracking_keypoint_names
                 command_obs[obs_key]["joint_names"] = tracking_joint_names
                 command_obs[obs_key]["root_body_name"] = root_body_name
-        elif cfg.task.command._target_ == "active_adaptation.envs.mdp.commands.hdmi.command.RobotObjectTracking":
+        elif cfg.task.command._target_ == _TARGET_ROBOT_OBJECT_TRACKING:
             from active_adaptation.envs.mdp.commands.hdmi.command import RobotObjectTracking
             command: RobotObjectTracking
             assert command.dataset.num_motions == 1
@@ -204,7 +211,7 @@ def main(cfg):
                     else:
                         object_obs[obs_key]["object_name"] = object_asset_name
                     object_obs[obs_key]["root_body_name"] = root_body_name
-        elif cfg.task.command._target_ == "active_adaptation.envs.mdp.commands.hdmi.command.RobotObjectGoalConditioned":
+        elif cfg.task.command._target_ == _TARGET_ROBOT_GOAL_CONDITIONED:
             from active_adaptation.envs.mdp.commands.hdmi.command import RobotObjectGoalConditioned
             command: RobotObjectGoalConditioned
             assert command.dataset.num_motions == 1
@@ -240,7 +247,7 @@ def main(cfg):
                     else:
                         object_obs[obs_key]["object_name"] = object_asset_name
                         object_obs[obs_key]["root_body_name"] = root_body_name
-        elif cfg.task.command._target_ == "active_adaptation.envs.mdp.commands.box_transport.command.BoxTransport":
+        elif cfg.task.command._target_ == _TARGET_BOX_TRANSPORT:
             from active_adaptation.envs.mdp.commands.box_transport.command import BoxTransport
             command: BoxTransport
             object_asset_name = command.object_asset_name
@@ -280,8 +287,7 @@ def main(cfg):
     _goal_pos = cfg.get("goal_pos", None)
     _goal_yaw = cfg.get("goal_yaw", None)
     _inject_goal = (_goal_pos is not None or _goal_yaw is not None) and \
-        cfg.task.command.get("_target_", "") == \
-        "active_adaptation.envs.mdp.commands.hdmi.command.RobotObjectGoalConditioned"
+        cfg.task.command.get("_target_", "") == _TARGET_ROBOT_GOAL_CONDITIONED
 
     def _apply_goal(command):
         """Inject user-specified goal into every environment."""

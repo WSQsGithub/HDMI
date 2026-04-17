@@ -590,8 +590,12 @@ class diff_object_pos_to_goal_b(RobotGoalCondObservation):
 
 
 class diff_object_ori_to_goal_b(RobotGoalCondObservation):
-    """Difference between the current object orientation and the goal orientation,
-    expressed as the first two rows of the relative rotation matrix (6-D).
+    """Difference between the current object orientation and the goal orientation.
+
+    Represented as the first two rows of the relative rotation matrix (6-D).
+    The relative rotation is computed in the world frame as
+    ``R_diff = R_object^T @ R_goal``, i.e. the rotation needed to go from the
+    current object orientation to the goal orientation.
 
     Shape: [num_envs, 6]
     """
@@ -603,7 +607,7 @@ class diff_object_ori_to_goal_b(RobotGoalCondObservation):
     def update(self):
         goal_quat_w = self.command_manager.goal_object_quat_w        # [num_envs, 4]
         object_quat_w = self.command_manager.object_quat_w           # [num_envs, 4]
-        # Relative rotation: from object to goal
+        # Relative rotation from current object orientation to goal (world frame)
         diff_quat = quat_mul(quat_conjugate(object_quat_w), goal_quat_w)
         self.diff_object_ori_to_goal_b = matrix_from_quat(diff_quat)
 
