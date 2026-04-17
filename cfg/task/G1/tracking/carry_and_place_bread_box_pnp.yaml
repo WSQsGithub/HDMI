@@ -1,0 +1,101 @@
+# @package task
+# Goal-conditioned Pick-and-Place (PNP) extension of the carry_and_place_bread_box task.
+#
+# The policy receives the desired goal pose of the bread box as an additional
+# observation and is rewarded for moving the box towards that goal rather than
+# purely tracking the motion-capture trajectory.
+#
+# Inherits all defaults from the hdmi base config and overrides what is needed.
+defaults:
+  - base/hdmi-base
+  - _self_
+
+name: G1CarryAndPlaceBreadBoxPNP
+
+viewer:
+  env_spacing: 5.0
+  lookat: [0., 0., 0.5]
+  eye: [0.0, 3.0, 1.5]
+
+robot:
+  name: g1
+  robot_type: g1_29dof_rubberhand-feet_sphere-eef_box-body_capsule
+  override_params:
+    init_state:
+      joint_pos:
+        left_wrist_yaw_joint: -0.4
+        right_wrist_yaw_joint: 0.4
+    actuators:
+      arms:
+        stiffness:
+          ".*_wrist_roll_joint": 4.0
+          ".*_wrist_pitch_joint": 4.0
+          ".*_wrist_yaw_joint": 4.0
+
+command:
+  _target_: active_adaptation.envs.mdp.commands.hdmi.command.RobotObjectGoalConditioned
+  data_path: data/motion/data_for_sim/carry_and_place_bread_box-0829
+  root_body_name: "pelvis"
+
+  extra_object_names: ["support0", "support1"]
+  object_asset_name: "bread_box"
+  object_body_name:  "bread_box"
+
+  object_pose_range:
+    x: [-0.0, 0.0]
+    y: [-0.0, 0.0]
+
+  contact_target_pos_offset:
+    - [0, 0.17, 0.14]   # left wrist
+    - [0, -0.17, 0.14]  # right wrist
+  contact_eef_pos_offset:
+    - [0.05, 0.0, 0.0]  # left wrist
+    - [0.05, 0.0, 0.0]  # right wrist
+
+  # ---- Goal sampling configuration ----
+  # Goal position offset sampled relative to the motion's final object position.
+  # Set to 0 on both axes during eval (zero offset = motion endpoint).
+  goal_pos_range:
+    x: [-0.3, 0.3]
+    y: [-0.3, 0.3]
+    z: [0.0, 0.0]
+
+  # Goal yaw sampled uniformly in radians on top of the motion's final orientation.
+  goal_yaw_range: [-1.57, 1.57]
+
+  # Optionally fix the goal for all envs (useful for debugging / deployment).
+  # fixed_goal_pos: [0.5, 0.0, 0.8]
+  # fixed_goal_yaw: 0.0
+
+randomization:
+  object_body_randomization:
+    static_dynamic_friction_ratio_range: [1.0, 2.0]
+    dynamic_friction_range: [0.3, 0.8]
+    restitution_range: [0.0, 0.2]
+    mass_range: [1.2, 1.8]
+
+  body_scale:
+    name: "bread_box"
+    scale_range: [0.9, 1.1]
+
+# ---- Observation overrides ----
+# Append goal-conditioned observations into the 'object' group so the policy
+# can condition on the desired box pose.
+observation:
+  object:
+    object_xy_b:               {noise_std: 0.01, episodic_noise_std: 0.0}
+    object_heading_b:          {noise_std: 0.01, episodic_noise_std: 0.0}
+    ref_contact_pos_b:         {noise_std: 0.01, episodic_noise_std: 0.02, yaw_only: true}
+    # Goal-conditioned observations
+    goal_object_pos_b:         {}
+    goal_object_ori_b:         {}
+    diff_object_pos_to_goal_b: {}
+    diff_object_ori_to_goal_b: {}
+
+# ---- Reward overrides ----
+# Add goal-conditioned rewards on top of the inherited tracking rewards.
+reward:
+  goal_conditioned:
+    object_goal_pos_reward:    {weight: 2.0, sigma: 0.25}
+    object_goal_ori_reward:    {weight: 1.0, sigma: 0.5}
+    object_place_success_reward: {weight: 5.0, pos_threshold: 0.05, ori_threshold: 0.2}

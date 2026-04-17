@@ -646,3 +646,150 @@ class RobotObjectTracking(RobotTracking):
             color=(0, 1, 0, 1),
             size=4.0,
         )
+
+
+class RobotObjectGoalConditioned(RobotObjectTracking):
+    """Extends RobotObjectTracking with a goal-conditioned object pose.
+
+    Instead of purely tracking the motion-capture box trajectory, this command
+    also maintains a *goal pose* for the object (position + orientation) that can
+    be randomly sampled each episode or set externally at inference time.  The
+    goal is expressed in the world frame and anchored to the final frame of the
+    reference motion so that it stays physically plausible.
+
+    Attributes:
+        goal_object_pos_w  (num_envs, 3):  per-env goal position in world frame.
+        goal_object_quat_w (num_envs, 4):  per-env goal orientation (wxyz) in world frame.
+    """
+
+    def __init__(
+        self,
+        # Goal position range relative to the motion's final object position (per axis)
+        goal_pos_range: Dict[str, Tuple[float, float]] = {
+            "x": (-0.5, 0.5),
+            "y": (-0.5, 0.5),
+            "z": (0.0, 0.0),
+        },
+        # Goal yaw range [min, max] in radians, applied on top of the motion's final orientation
+        goal_yaw_range: Tuple[float, float] = (-3.14159, 3.14159),
+        # Optional fixed goal overrides (used at inference time via set_goal or config)
+        fixed_goal_pos: List[float] | None = None,
+        fixed_goal_yaw: float | None = None,
+        **kwargs,
+    ):
+        # call_update is True by default inside RobotObjectTracking.__init__, so
+        # parent will call self.update() during init – that is fine because we
+        # initialise goal tensors *before* super().__init__ completes via the
+        # overridden sample_init that super calls internally. However
+        # _sample_goals relies on motion_ends which is set in _sample_motions
+        # (called inside sample_init).  We therefore store the range parameters
+        # first so that _sample_goals can read them when sample_init is called
+        # by the parent constructor.
+        goal_pos_range_list = [goal_pos_range.get(k, (0.0, 0.0)) for k in ["x", "y", "z"]]
+        self._goal_pos_range = goal_pos_range_list  # temporarily plain list
+        self._goal_yaw_range = goal_yaw_range
+        self._fixed_goal_pos = fixed_goal_pos
+        self._fixed_goal_yaw = fixed_goal_yaw
+
+        # Allocate tensors with dummy device; will be overwritten once we know
+        # self.device (after super().__init__ runs Command.__init__).
+        # We use a flag to detect first-time init inside sample_init.
+        self._goal_tensors_initialized = False
+
+        super().__init__(**kwargs)
+
+    def _ensure_goal_tensors(self):
+        """Lazily allocate goal tensors on the correct device."""
+        if self._goal_tensors_initialized:
+            return
+        with torch.device(self.device):
+            self.goal_object_pos_w = torch.zeros(self.num_envs, 3)
+            self.goal_object_quat_w = torch.zeros(self.num_envs, 4)
+            self.goal_object_quat_w[:, 0] = 1.0  # identity quaternion (w=1)
+
+        self.goal_pos_range = torch.tensor(
+            self._goal_pos_range, device=self.device
+        )  # shape [3, 2]
+        self.goal_yaw_range = torch.tensor(self._goal_yaw_range, device=self.device)  # shape [2]
+
+        if self._fixed_goal_pos is not None:
+            self.fixed_goal_pos = torch.tensor(self._fixed_goal_pos, device=self.device)
+        else:
+            self.fixed_goal_pos = None
+        self.fixed_goal_yaw = self._fixed_goal_yaw
+
+        self._goal_tensors_initialized = True
+
+    def sample_init(self, env_ids: torch.Tensor) -> None:
+        """Reset robot/object states and resample goal poses for the given envs."""
+        # Ensure tensors exist (first call may come before super.__init__ sets device)
+        self._ensure_goal_tensors()
+        super().sample_init(env_ids)
+        self._sample_goals(env_ids)
+
+    def _sample_goals(self, env_ids: torch.Tensor) -> None:
+        """Sample new goal poses for the given environments.
+
+        The goal is expressed as an offset from the *final* frame of the
+        reference motion so it remains physically plausible.
+        """
+        n = len(env_ids)
+
+        # ---- position ----
+        if self.fixed_goal_pos is not None:
+            goal_pos_offset = self.fixed_goal_pos.unsqueeze(0).expand(n, -1).clone()
+        else:
+            goal_pos_offset = sample_uniform(
+                self.goal_pos_range[:, 0],
+                self.goal_pos_range[:, 1],
+                (n, 3),
+                device=self.device,
+            )
+
+        if not self.env.training:
+            goal_pos_offset = torch.zeros(n, 3, device=self.device)
+
+        # Final frame of the reference motion (absolute index into dataset.data)
+        final_idx = self.motion_ends[env_ids] - 1  # shape [n]
+        final_object_pos = (
+            self.dataset.data.body_pos_w[final_idx, self.object_body_id_motion]
+            + self.env.scene.env_origins[env_ids]
+        )
+        self.goal_object_pos_w[env_ids] = final_object_pos + goal_pos_offset
+
+        # ---- orientation ----
+        if self.fixed_goal_yaw is not None:
+            yaw = torch.full((n,), self.fixed_goal_yaw, device=self.device)
+        else:
+            yaw = sample_uniform(
+                self.goal_yaw_range[0].item(),
+                self.goal_yaw_range[1].item(),
+                (n,),
+                device=self.device,
+            )
+
+        if not self.env.training:
+            yaw = torch.zeros(n, device=self.device)
+
+        final_object_quat = self.dataset.data.body_quat_w[
+            final_idx, self.object_body_id_motion
+        ]
+        yaw_delta = quat_from_euler_xyz(
+            torch.zeros(n, device=self.device),
+            torch.zeros(n, device=self.device),
+            yaw,
+        )
+        self.goal_object_quat_w[env_ids] = quat_mul(final_object_quat, yaw_delta)
+
+    def set_goal(
+        self, env_ids: torch.Tensor, pos: torch.Tensor, quat: torch.Tensor
+    ) -> None:
+        """Set the goal pose for specific environments (used at inference time).
+
+        Args:
+            env_ids: Environment indices, shape [N].
+            pos:     Goal position in world frame, shape [N, 3].
+            quat:    Goal orientation quaternion (wxyz) in world frame, shape [N, 4].
+        """
+        self.goal_object_pos_w[env_ids] = pos
+        self.goal_object_quat_w[env_ids] = quat

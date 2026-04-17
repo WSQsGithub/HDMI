@@ -204,6 +204,42 @@ def main(cfg):
                     else:
                         object_obs[obs_key]["object_name"] = object_asset_name
                     object_obs[obs_key]["root_body_name"] = root_body_name
+        elif cfg.task.command._target_ == "active_adaptation.envs.mdp.commands.hdmi.command.RobotObjectGoalConditioned":
+            from active_adaptation.envs.mdp.commands.hdmi.command import RobotObjectGoalConditioned
+            command: RobotObjectGoalConditioned
+            assert command.dataset.num_motions == 1
+            tracking_keypoint_names = command.tracking_keypoint_names
+            tracking_joint_names = command.tracking_joint_names
+            motion_duration_second = command.dataset.lengths[0].item() * env.step_dt
+            future_steps = command.future_steps.tolist()
+            root_body_name = command.root_body_name
+
+            # for motion observation
+            for obs_key in command_obs:
+                command_obs[obs_key]["motion_duration_second"] = motion_duration_second
+                command_obs[obs_key]["motion_path"] = cfg.task.command.data_path
+                command_obs[obs_key]["future_steps"] = future_steps
+                command_obs[obs_key]["body_names"] = tracking_keypoint_names
+                command_obs[obs_key]["joint_names"] = tracking_joint_names
+                command_obs[obs_key]["root_body_name"] = root_body_name
+
+            object_asset_name = cfg.task.command.object_asset_name
+            object_body_name = cfg.task.command.object_body_name
+            contact_target_pos_offset = np.array(cfg.task.command.contact_target_pos_offset).tolist()
+            # for object observation in object obs (includes goal-conditioned obs)
+            object_obs = policy_config["observation"].get("object", None)
+            if object_obs is not None:
+                for obs_key in object_obs:
+                    if obs_key == "ref_contact_pos_b":
+                        object_obs[obs_key]["object_name"] = object_body_name
+                        object_obs[obs_key]["contact_target_pos_offset"] = contact_target_pos_offset
+                    elif obs_key in ("goal_object_pos_b", "goal_object_ori_b",
+                                     "diff_object_pos_to_goal_b", "diff_object_ori_to_goal_b"):
+                        # goal-conditioned observations – only need root_body_name
+                        object_obs[obs_key]["root_body_name"] = root_body_name
+                    else:
+                        object_obs[obs_key]["object_name"] = object_asset_name
+                        object_obs[obs_key]["root_body_name"] = root_body_name
         elif cfg.task.command._target_ == "active_adaptation.envs.mdp.commands.box_transport.command.BoxTransport":
             from active_adaptation.envs.mdp.commands.box_transport.command import BoxTransport
             command: BoxTransport
@@ -237,9 +273,47 @@ def main(cfg):
     ]
     episode_stats = EpisodeStats(stats_keys, device=env.device)
     rollout_policy = policy.get_rollout_policy("eval")
-    
+
+    # ---- Optional: inject a fixed goal pose for goal-conditioned tasks ----
+    # Recognised cfg keys:  cfg.goal_pos  (list [x, y, z])
+    #                        cfg.goal_yaw  (float, degrees)
+    _goal_pos = cfg.get("goal_pos", None)
+    _goal_yaw = cfg.get("goal_yaw", None)
+    _inject_goal = (_goal_pos is not None or _goal_yaw is not None) and \
+        cfg.task.command.get("_target_", "") == \
+        "active_adaptation.envs.mdp.commands.hdmi.command.RobotObjectGoalConditioned"
+
+    def _apply_goal(command):
+        """Inject user-specified goal into every environment."""
+        from active_adaptation.envs.mdp.commands.hdmi.command import RobotObjectGoalConditioned
+        if not isinstance(command, RobotObjectGoalConditioned):
+            return
+        all_envs = torch.arange(env.num_envs, device=env.device)
+        if _goal_pos is not None:
+            pos = torch.tensor(_goal_pos, device=env.device, dtype=torch.float32)
+            # broadcast to all envs, offset by env origins
+            pos_w = pos.unsqueeze(0).expand(env.num_envs, -1) + env.base_env.scene.env_origins
+        else:
+            pos_w = command.goal_object_pos_w.clone()
+
+        if _goal_yaw is not None:
+            import math
+            yaw_rad = math.radians(float(_goal_yaw))
+            yaw_tensor = torch.full((env.num_envs,), yaw_rad, device=env.device)
+            zeros = torch.zeros_like(yaw_tensor)
+            from isaaclab.utils.math import quat_from_euler_xyz, quat_mul
+            yaw_quat = quat_from_euler_xyz(zeros, zeros, yaw_tensor)
+            # apply on top of current goal quat
+            quat_w = quat_mul(command.goal_object_quat_w, yaw_quat)
+        else:
+            quat_w = command.goal_object_quat_w.clone()
+
+        command.set_goal(all_envs, pos_w, quat_w)
+
     env.base_env.eval()
     td_ = env.reset()
+    if _inject_goal:
+        _apply_goal(env.base_env.command_manager)
     assert not env.base_env.training
     with torch.inference_mode(), set_exploration_type(ExplorationType.MODE):
         torch.compiler.cudagraph_mark_step_begin()
@@ -248,6 +322,10 @@ def main(cfg):
             td, td_ = env.step_and_maybe_reset(td_)
             # td_.update(td["next"])
             episode_stats.add(td)
+
+            # Re-apply goal after each reset in case new episodes started
+            if _inject_goal:
+                _apply_goal(env.base_env.command_manager)
 
             if len(episode_stats) >= env.num_envs:
                 print("Step", i)

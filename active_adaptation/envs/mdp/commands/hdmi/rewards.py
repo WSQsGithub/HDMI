@@ -490,3 +490,73 @@ class eef_contact_all(RobotObjectTrackReward):
         return rew.unsqueeze(-1)
 
 
+# ---------------------------------------------------------------------------
+# Goal-conditioned rewards (RobotObjectGoalConditioned)
+# ---------------------------------------------------------------------------
+
+from active_adaptation.envs.mdp.commands.hdmi.command import RobotObjectGoalConditioned
+
+RobotGoalCondReward = BaseReward[RobotObjectGoalConditioned]
+
+
+class object_goal_pos_reward(RobotGoalCondReward):
+    """Reward based on the distance between the current object position and the
+    goal position.  Uses a Gaussian kernel: ``exp(-dist / sigma)``.
+    """
+
+    def __init__(self, sigma: float = 0.25, **kwargs):
+        super().__init__(**kwargs)
+        self.sigma = sigma
+
+    def compute(self):
+        goal_pos_w = self.command_manager.goal_object_pos_w    # [num_envs, 3]
+        object_pos_w = self.command_manager.object_pos_w       # [num_envs, 3]
+        dist = (goal_pos_w - object_pos_w).norm(dim=-1)        # [num_envs]
+        return torch.exp(-dist / self.sigma).unsqueeze(1)
+
+
+class object_goal_ori_reward(RobotGoalCondReward):
+    """Reward based on the angular difference between the current object orientation
+    and the goal orientation.  Uses a Gaussian kernel: ``exp(-angle / sigma)``.
+    """
+
+    def __init__(self, sigma: float = 0.5, **kwargs):
+        super().__init__(**kwargs)
+        self.sigma = sigma
+
+    def compute(self):
+        goal_quat_w = self.command_manager.goal_object_quat_w    # [num_envs, 4]
+        object_quat_w = self.command_manager.object_quat_w       # [num_envs, 4]
+        diff_quat = quat_mul(quat_conjugate(goal_quat_w), object_quat_w)
+        angle = axis_angle_from_quat(diff_quat).norm(dim=-1)     # [num_envs]
+        return torch.exp(-angle / self.sigma).unsqueeze(1)
+
+
+class object_place_success_reward(RobotGoalCondReward):
+    """Binary reward (0/1) that fires when the object is within ``pos_threshold``
+    metres of the goal position *and* within ``ori_threshold`` radians of the
+    goal orientation.  Useful as a sparse success bonus.
+    """
+
+    def __init__(
+        self,
+        pos_threshold: float = 0.05,
+        ori_threshold: float = 0.2,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.pos_threshold = pos_threshold
+        self.ori_threshold = ori_threshold
+
+    def compute(self):
+        goal_pos_w = self.command_manager.goal_object_pos_w     # [num_envs, 3]
+        object_pos_w = self.command_manager.object_pos_w        # [num_envs, 3]
+        dist = (goal_pos_w - object_pos_w).norm(dim=-1)         # [num_envs]
+
+        goal_quat_w = self.command_manager.goal_object_quat_w   # [num_envs, 4]
+        object_quat_w = self.command_manager.object_quat_w      # [num_envs, 4]
+        diff_quat = quat_mul(quat_conjugate(goal_quat_w), object_quat_w)
+        angle = axis_angle_from_quat(diff_quat).norm(dim=-1)    # [num_envs]
+
+        success = (dist < self.pos_threshold) & (angle < self.ori_threshold)
+        return success.float().unsqueeze(1)

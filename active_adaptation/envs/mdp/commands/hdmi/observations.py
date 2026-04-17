@@ -509,3 +509,103 @@ class diff_object_joint_pos_future(RobotObjectTrackObservation):
 class ref_object_contact_future(RobotObjectTrackObservation):
     def compute(self):
         return self.command_manager.ref_object_contact_future.view(self.num_envs, -1)
+
+
+# ---------------------------------------------------------------------------
+# Goal-conditioned observations (RobotObjectGoalConditioned)
+# ---------------------------------------------------------------------------
+
+from active_adaptation.envs.mdp.commands.hdmi.command import RobotObjectGoalConditioned
+
+RobotGoalCondObservation = BaseObservation[RobotObjectGoalConditioned]
+
+
+class goal_object_pos_b(RobotGoalCondObservation):
+    """Goal object position expressed in the robot root frame.
+
+    Shape: [num_envs, 3]
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.goal_object_pos_b = torch.zeros(self.num_envs, 3, device=self.device)
+
+    def update(self):
+        goal_pos_w = self.command_manager.goal_object_pos_w          # [num_envs, 3]
+        robot_root_pos_w = self.command_manager.robot_root_pos_w     # [num_envs, 3]
+        robot_root_quat_w = self.command_manager.robot_root_quat_w   # [num_envs, 4]
+        self.goal_object_pos_b = quat_apply_inverse(
+            robot_root_quat_w, goal_pos_w - robot_root_pos_w
+        )
+
+    def compute(self):
+        return self.goal_object_pos_b.view(self.num_envs, -1)
+
+
+class goal_object_ori_b(RobotGoalCondObservation):
+    """Goal object orientation expressed in the robot root frame.
+
+    Represented as the first two rows of the rotation matrix (6-D).
+    Shape: [num_envs, 6]
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.goal_object_ori_b = torch.zeros(self.num_envs, 3, 3, device=self.device)
+
+    def update(self):
+        goal_quat_w = self.command_manager.goal_object_quat_w        # [num_envs, 4]
+        robot_root_quat_w = self.command_manager.robot_root_quat_w   # [num_envs, 4]
+        goal_quat_b = quat_mul(
+            quat_conjugate(robot_root_quat_w),
+            goal_quat_w,
+        )
+        self.goal_object_ori_b = matrix_from_quat(goal_quat_b)
+
+    def compute(self):
+        # Return first two rows of the rotation matrix (6-D representation)
+        return self.goal_object_ori_b[:, :2, :].reshape(self.num_envs, -1)
+
+
+class diff_object_pos_to_goal_b(RobotGoalCondObservation):
+    """Difference between the current object position and the goal position,
+    expressed in the robot root frame.
+
+    Shape: [num_envs, 3]
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.diff_object_pos_to_goal_b = torch.zeros(self.num_envs, 3, device=self.device)
+
+    def update(self):
+        goal_pos_w = self.command_manager.goal_object_pos_w          # [num_envs, 3]
+        object_pos_w = self.command_manager.object_pos_w             # [num_envs, 3]
+        robot_root_quat_w = self.command_manager.robot_root_quat_w   # [num_envs, 4]
+        diff_w = goal_pos_w - object_pos_w
+        self.diff_object_pos_to_goal_b = quat_apply_inverse(robot_root_quat_w, diff_w)
+
+    def compute(self):
+        return self.diff_object_pos_to_goal_b.view(self.num_envs, -1)
+
+
+class diff_object_ori_to_goal_b(RobotGoalCondObservation):
+    """Difference between the current object orientation and the goal orientation,
+    expressed as the first two rows of the relative rotation matrix (6-D).
+
+    Shape: [num_envs, 6]
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.diff_object_ori_to_goal_b = torch.zeros(self.num_envs, 3, 3, device=self.device)
+
+    def update(self):
+        goal_quat_w = self.command_manager.goal_object_quat_w        # [num_envs, 4]
+        object_quat_w = self.command_manager.object_quat_w           # [num_envs, 4]
+        # Relative rotation: from object to goal
+        diff_quat = quat_mul(quat_conjugate(object_quat_w), goal_quat_w)
+        self.diff_object_ori_to_goal_b = matrix_from_quat(diff_quat)
+
+    def compute(self):
+        return self.diff_object_ori_to_goal_b[:, :2, :].reshape(self.num_envs, -1)
